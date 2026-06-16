@@ -86,6 +86,37 @@
           <pre style="white-space:pre-wrap;max-height:200px;overflow:auto;">{{ JSON.stringify(syncResult.failed, null, 2) }}</pre>
         </el-collapse-item>
       </el-collapse>
+      <div v-if="syncResult.reconcile_results?.length" style="margin-top:16px;">
+        <h4 style="margin:0 0 8px;">📋 补对结果明细</h4>
+        <el-table :data="syncResult.reconcile_results" size="small" stripe border>
+          <el-table-column prop="record_no" label="离线记录号" width="180" />
+          <el-table-column prop="plate_no" label="车牌" width="110" />
+          <el-table-column label="类型" width="70">
+            <template #default="{row}">{{ row.action_type === 'in' ? '入场' : '出场' }}</template>
+          </el-table-column>
+          <el-table-column label="补对状态" width="110">
+            <template #default="{row}">
+              <el-tag size="small" :type="row.reconcile_status === 'matched' ? 'success' : (row.reconcile_status === 'unmatched' ? 'danger' : 'warning')">
+                {{ { matched: '已补对', unmatched: '未匹配', pending: '待处理' }[row.reconcile_status] || row.reconcile_status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="匹配停车" width="100">
+            <template #default="{row}">{{ row.matched_parking_id ? `#${row.matched_parking_id}` : '-' }}</template>
+          </el-table-column>
+          <el-table-column label="匹配优惠券" width="100">
+            <template #default="{row}">{{ row.matched_coupon_id ? `#${row.matched_coupon_id}` : '-' }}</template>
+          </el-table-column>
+          <el-table-column label="匹配订单" width="100">
+            <template #default="{row}">{{ row.matched_order_id ? `#${row.matched_order_id}` : '-' }}</template>
+          </el-table-column>
+        </el-table>
+        <div style="margin-top:8px;display:flex;gap:12px;">
+          <el-tag type="success" size="small">已补对: {{ syncResult.reconcile_results.filter(r => r.reconcile_status === 'matched').length }}</el-tag>
+          <el-tag type="danger" size="small">未匹配: {{ syncResult.reconcile_results.filter(r => r.reconcile_status === 'unmatched').length }}</el-tag>
+          <el-tag type="warning" size="small">待处理: {{ syncResult.reconcile_results.filter(r => r.reconcile_status === 'pending').length }}</el-tag>
+        </div>
+      </div>
     </div>
   </div>
 </template>

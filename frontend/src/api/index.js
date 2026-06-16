@@ -61,12 +61,16 @@ const api = {
     issueCoupon: (data) => request.post('/merchant/issue-coupon', data),
     getCoupons: (params) => request.get('/merchant/coupons', { params }),
     getCoupon: (id) => request.get(`/merchant/coupons/${id}`),
-    revokeCoupon: (data) => request.post('/merchant/revoke-coupon', data)
+    revokeCoupon: (data) => request.post('/merchant/revoke-coupon', data),
+    getMonthlyQuotas: (params) => request.get('/merchant/monthly-quotas', { params }),
+    adjustMonthlyQuota: (data) => request.post('/merchant/monthly-quotas/adjust', data),
+    getBudgetHint: (params) => request.get('/merchant/budget-hint', { params })
   },
   customer: {
     getPlates: () => request.get('/customer/my-plates'),
     bindPlate: (data) => request.post('/customer/bind-plate', data),
     rebindPlate: (data) => request.post('/customer/rebind-plate', data),
+    rebindCheck: (data) => request.post('/customer/rebind-check', data),
     bindCoupon: (data) => request.post('/customer/bind-coupon', data),
     getCoupons: (params) => request.get('/customer/my-coupons', { params }),
     getParkingStatus: () => request.get('/customer/parking-status')
@@ -95,7 +99,10 @@ const api = {
     couponStatus: () => request.get('/dashboard/coupon-status'),
     plateStatus: () => request.get('/dashboard/plate-status'),
     reconciliation: (params) => request.get('/dashboard/reconciliation', { params }),
-    exitStatus: () => request.get('/dashboard/exit-status')
+    exitStatus: () => request.get('/dashboard/exit-status'),
+    monthlyReconciliation: (params) => request.get('/dashboard/monthly-reconciliation', { params }),
+    exceptionExits: (params) => request.get('/dashboard/exception-exits', { params }),
+    retroVerifications: (params) => request.get('/dashboard/retro-verifications', { params })
   }
 };
 

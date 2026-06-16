@@ -205,4 +205,115 @@ router.get('/dashboard/exit-status', authMiddleware(['booth', 'service', 'admin'
   }));
 });
 
+router.get('/dashboard/monthly-reconciliation', authMiddleware(['admin', 'service']), (req, res) => {
+  const { month } = req.query;
+  const targetMonth = month || dayjs().format('YYYY-MM');
+  const monthStart = `${targetMonth}-01 00:00:00`;
+  const nextMonth = dayjs(targetMonth + '-01').add(1, 'month').format('YYYY-MM');
+  const monthEnd = `${nextMonth}-01 00:00:00`;
+
+  const shops = db.prepare(`
+    SELECT s.id as shop_id, s.shop_name, s.shop_code,
+      (SELECT COALESCE(SUM(c.order_amount),0) FROM coupons c WHERE c.shop_id = s.id AND c.coupon_type='full' AND c.issued_at >= ? AND c.issued_at < ?) as full_issued_amount,
+      (SELECT COUNT(*) FROM coupons c WHERE c.shop_id = s.id AND c.coupon_type='full' AND c.issued_at >= ? AND c.issued_at < ?) as full_issued_count,
+      (SELECT COALESCE(SUM(c.discount_value),0) FROM coupons c WHERE c.shop_id = s.id AND c.coupon_type='discount' AND c.issued_at >= ? AND c.issued_at < ?) as discount_issued_amount,
+      (SELECT COUNT(*) FROM coupons c WHERE c.shop_id = s.id AND c.coupon_type='discount' AND c.issued_at >= ? AND c.issued_at < ?) as discount_issued_count,
+      (SELECT COUNT(*) FROM coupons c WHERE c.shop_id = s.id AND c.status='verified' AND c.verified_at >= ? AND c.verified_at < ?) as verified_count,
+      (SELECT COALESCE(SUM(c.discount_hours)*10,0) FROM coupons c WHERE c.shop_id = s.id AND c.status='verified' AND c.verified_at >= ? AND c.verified_at < ?) as verified_discount_total,
+      (SELECT COUNT(*) FROM coupons c WHERE c.shop_id = s.id AND c.status='revoked' AND EXISTS (SELECT 1 FROM coupon_revocations r WHERE r.coupon_id = c.id AND r.revoked_at >= ? AND r.revoked_at < ?)) as revoked_count,
+      COALESCE((SELECT SUM(r.order_amount) FROM coupons c JOIN coupon_revocations r ON r.coupon_id = c.id WHERE c.shop_id = s.id AND r.revoked_at >= ? AND r.revoked_at < ?),0) as revoked_amount,
+      mq.quota_amount as monthly_quota,
+      mq.used_amount as monthly_used,
+      (mq.quota_amount - mq.used_amount) as monthly_remain,
+      mq.full_coupon_used,
+      mq.discount_coupon_used
+    FROM shops s
+    LEFT JOIN monthly_quotas mq ON mq.shop_id = s.id AND mq.month = ?
+    ORDER BY s.id
+  `).all(monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd,
+         monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, targetMonth);
+
+  const totals = shops.reduce((acc, s) => ({
+    full_issued_amount: acc.full_issued_amount + Number(s.full_issued_amount),
+    full_issued_count: acc.full_issued_count + s.full_issued_count,
+    discount_issued_amount: acc.discount_issued_amount + Number(s.discount_issued_amount),
+    discount_issued_count: acc.discount_issued_count + s.discount_issued_count,
+    verified_count: acc.verified_count + s.verified_count,
+    verified_discount_total: acc.verified_discount_total + Number(s.verified_discount_total),
+    revoked_count: acc.revoked_count + s.revoked_count,
+    revoked_amount: acc.revoked_amount + Number(s.revoked_amount)
+  }), { full_issued_amount: 0, full_issued_count: 0, discount_issued_amount: 0, discount_issued_count: 0,
+        verified_count: 0, verified_discount_total: 0, revoked_count: 0, revoked_amount: 0 });
+
+  totals.balance_check = {
+    issued_total: totals.full_issued_amount + totals.discount_issued_amount,
+    verified_deduct: totals.verified_discount_total,
+    revoked_refund: totals.revoked_amount,
+    is_balanced: Math.abs((totals.full_issued_amount + totals.discount_issued_amount) - totals.verified_discount_total - totals.revoked_amount) < 0.01
+  };
+
+  res.json(success({ month: targetMonth, shops, totals }));
+});
+
+router.get('/dashboard/exception-exits', authMiddleware(['admin', 'service', 'booth']), (req, res) => {
+  const { start_date, end_date } = req.query;
+  const start = start_date || dayjs().subtract(7, 'day').format('YYYY-MM-DD') + ' 00:00:00';
+  const end = end_date || dayjs().format('YYYY-MM-DD') + ' 23:59:59';
+
+  const exceptions = db.prepare(`
+    SELECT pr.*, vp.customer_phone,
+      CASE WHEN pr.coupon_id IS NOT NULL THEN '有券未核销' ELSE '无券' END as coupon_status,
+      CASE pr.exit_type
+        WHEN 'exception' THEN '异常出场'
+        WHEN 'manual_release' THEN '人工放行'
+        ELSE '其他'
+      END as exit_type_text
+    FROM parking_records pr
+    LEFT JOIN vehicle_plates vp ON pr.plate_no = vp.plate_no
+    WHERE pr.status = 'exception'
+      AND pr.in_time >= ? AND pr.in_time <= ?
+    ORDER BY pr.in_time DESC
+    LIMIT 200
+  `).all(start, end);
+
+  res.json(success({ exceptions, date_range: { start, end } }));
+});
+
+router.get('/dashboard/retro-verifications', authMiddleware(['admin', 'service', 'booth']), (req, res) => {
+  const { start_date, end_date } = req.query;
+  const start = start_date || dayjs().subtract(7, 'day').format('YYYY-MM-DD') + ' 00:00:00';
+  const end = end_date || dayjs().format('YYYY-MM-DD') + ' 23:59:59';
+
+  const retroRecords = db.prepare(`
+    SELECT pr.*, c.coupon_no, c.coupon_type, s.shop_name,
+      bv.verify_time as retro_verify_time, bv.remark as retro_remark,
+      CASE pr.exit_type
+        WHEN 'offline_retro' THEN '离线后补核销'
+        WHEN 'manual_release' THEN '人工放行后补'
+        ELSE pr.exit_type
+      END as exit_type_text
+    FROM parking_records pr
+    LEFT JOIN coupons c ON pr.retro_coupon_id = c.id
+    LEFT JOIN shops s ON c.shop_id = s.id
+    LEFT JOIN booth_verifications bv ON bv.verify_type = 'offline' AND bv.plate_no = pr.plate_no
+      AND bv.verify_time >= pr.out_time
+    WHERE pr.exit_type IN ('offline_retro', 'manual_release')
+      AND pr.out_time >= ? AND pr.out_time <= ?
+    ORDER BY pr.out_time DESC
+    LIMIT 200
+  `).all(start, end);
+
+  const offlineReconcile = db.prepare(`
+    SELECT or2.record_no, or2.plate_no, or2.action_type, or2.action_time,
+      or2.reconcile_status, or2.reconcile_remark, or2.reconcile_at,
+      or2.matched_parking_id, or2.matched_coupon_id, or2.matched_order_id
+    FROM offline_records or2
+    WHERE or2.synced = 1
+    ORDER BY or2.reconcile_at DESC
+    LIMIT 200
+  `).all();
+
+  res.json(success({ retro_records: retroRecords, offline_reconcile: offlineReconcile, date_range: { start, end } }));
+});
+
 module.exports = router;

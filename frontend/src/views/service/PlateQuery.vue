@@ -52,7 +52,7 @@
         <div class="card-shadow info-card">
           <div class="card-title" style="display:flex;justify-content:space-between;">
             <span><el-icon><Ticket /></el-icon>已绑定优惠券（{{ info.bound_coupons?.length || 0 }}）</span>
-            <el-button size="small" type="danger" plain @click="rebindDlg = true" :disabled="!info.bound_coupons?.length">改绑车牌</el-button>
+            <el-button size="small" type="danger" plain @click="openRebind" :disabled="!info.bound_coupons?.length">改绑车牌</el-button>
           </div>
           <el-table v-if="info.bound_coupons?.length" :data="info.bound_coupons" size="small" stripe>
             <el-table-column prop="coupon_no" label="券号" width="190" />
@@ -84,25 +84,43 @@
       </div>
     </div>
 
-    <el-dialog v-model="rebindDlg" title="客服改绑车牌（特权操作）" width="460px">
-      <el-alert type="warning" :closable="false" style="margin-bottom:16px;">仅客服/管理员可改绑，已核销的券不可改绑</el-alert>
-      <el-form :model="rebindForm" label-width="100px">
-        <el-form-item label="原车牌">{{ info.bound_coupons?.[0]?.plate_no }}</el-form-item>
-        <el-form-item label="选择优惠券" required>
-          <el-select v-model="rebindForm.coupon_id" placeholder="选择要改绑的券" style="width:100%;">
-            <el-option v-for="c in info.bound_coupons" :key="c.id" :label="`${c.coupon_no} (${c.discount_hours}h)`" :value="c.id" />
-          </el-select>
-        </el-form-item>
+    <el-dialog v-model="rebindDlg" title="客服改绑车牌（特权操作）" width="560px">
+      <div v-if="rebindCheckResult" style="margin-bottom:16px;">
+        <el-alert v-if="rebindCheckResult.blockers?.length" type="error" :closable="false" style="margin-bottom:8px;">
+          <template #title>阻断问题</template>
+          <div v-for="(b,i) in rebindCheckResult.blockers" :key="i" style="font-size:13px;">• {{ b }}</div>
+        </el-alert>
+        <el-alert v-if="rebindCheckResult.warnings?.length" type="warning" :closable="false" style="margin-bottom:8px;">
+          <template #title>风险提示</template>
+          <div v-for="(w,i) in rebindCheckResult.warnings" :key="i" style="font-size:13px;">• {{ w }}</div>
+        </el-alert>
+        <div v-if="rebindCheckResult.must_void_coupons?.length" style="padding:12px;background:#fef3c7;border-radius:8px;margin-bottom:8px;">
+          <div style="font-size:13px;font-weight:600;margin-bottom:6px;">以下旧车牌优惠券需作废：</div>
+          <div v-for="c in rebindCheckResult.must_void_coupons" :key="c.id" style="font-size:12px;color:#6b7280;">
+            {{ c.coupon_no }} - {{ c.shop_name }} ({{ c.discount_hours }}h)
+          </div>
+        </div>
+      </div>
+      <el-form :model="rebindForm" label-width="110px">
+        <el-form-item label="原车牌">{{ rebindForm.old_plate }}</el-form-item>
         <el-form-item label="新车牌" required>
-          <el-input v-model="rebindForm.new_plate" placeholder="如：京B88888" style="text-transform:uppercase;letter-spacing:2px;" />
+          <el-input v-model="rebindForm.new_plate" placeholder="如：京B88888" style="text-transform:uppercase;letter-spacing:2px;" @blur="checkRebind" />
+        </el-form-item>
+        <el-form-item v-if="rebindCheckResult?.must_void_coupons?.length" label="作废旧车牌券">
+          <el-switch v-model="rebindForm.void_old_coupons" active-text="作废旧券" inactive-text="保留旧券" />
+          <div style="font-size:12px;color:#d97706;margin-top:4px;">旧车牌在场时，如不选择作废旧券则无法完成改绑</div>
+        </el-form-item>
+        <el-form-item v-if="rebindCheckResult?.must_approve" label="审批确认">
+          <el-switch v-model="rebindForm.force_rebind" active-text="确认强制改绑" />
+          <div style="font-size:12px;color:#ef4444;margin-top:4px;">此操作将生成异常审批记录</div>
         </el-form-item>
         <el-form-item label="改绑原因">
           <el-input v-model="rebindForm.reason" type="textarea" :rows="2" placeholder="例如：顾客绑定错车牌" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="rebindDlg = false">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="doRebind">确认改绑</el-button>
+        <el-button @click="closeRebind">取消</el-button>
+        <el-button type="primary" :loading="submitting" :disabled="!canRebind" @click="doRebind">确认改绑</el-button>
       </template>
     </el-dialog>
 
@@ -161,7 +179,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import api from '@/api';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Search, Van, Location, Ticket, Warning, Promotion, Document } from '@element-plus/icons-vue';
@@ -173,7 +191,16 @@ const quickPlates = ['京A12345', '京B67890', '京C11111', '京D22222'];
 const submitting = ref(false);
 
 const rebindDlg = ref(false);
-const rebindForm = reactive({ coupon_id: null, old_plate: '', new_plate: '', reason: '' });
+const rebindForm = reactive({ coupon_id: null, old_plate: '', new_plate: '', reason: '', void_old_coupons: false, force_rebind: false });
+const rebindCheckResult = ref(null);
+const canRebind = computed(() => {
+  if (!rebindForm.new_plate) return false;
+  if (!rebindCheckResult.value) return true;
+  if (rebindCheckResult.value.blockers?.length) return false;
+  if (rebindCheckResult.value.must_void_coupons?.length && !rebindForm.void_old_coupons) return false;
+  if (rebindCheckResult.value.must_approve && !rebindForm.force_rebind) return false;
+  return rebindCheckResult.value.can_rebind !== false;
+});
 
 const releaseDlg = ref(false);
 const releaseForm = reactive({ plate_no: '', booth_id: 'BOOTH_N1', release_reason: '', waive_fee: 0 });
@@ -201,21 +228,49 @@ async function revokeCoupon(c) {
 }
 
 async function doRebind() {
-  if (!rebindForm.coupon_id || !rebindForm.new_plate) { ElMessage.warning('请完善信息'); return; }
+  if (!rebindForm.new_plate) { ElMessage.warning('请输入新车牌'); return; }
   submitting.value = true;
   try {
-    const c = info.value.bound_coupons.find(x => x.id === rebindForm.coupon_id);
+    const c = rebindForm.coupon_id ? info.value.bound_coupons.find(x => x.id === rebindForm.coupon_id) : null;
     await api.customer.rebindPlate({
       coupon_id: rebindForm.coupon_id,
-      old_plate: c.plate_no,
+      old_plate: rebindForm.old_plate || info.value.bound_coupons?.[0]?.plate_no,
       new_plate: rebindForm.new_plate,
-      reason: rebindForm.reason
+      reason: rebindForm.reason,
+      void_old_coupons: rebindForm.void_old_coupons,
+      force_rebind: rebindForm.force_rebind
     });
     rebindDlg.value = false;
     rebindForm.coupon_id = null;
     rebindForm.new_plate = '';
+    rebindForm.void_old_coupons = false;
+    rebindForm.force_rebind = false;
+    rebindCheckResult.value = null;
     query();
   } finally { submitting.value = false; }
+}
+
+function openRebind() {
+  rebindForm.old_plate = info.value.bound_coupons?.[0]?.plate_no || plate.value.toUpperCase();
+  rebindCheckResult.value = null;
+  rebindDlg.value = true;
+}
+
+async function checkRebind() {
+  if (!rebindForm.new_plate || !rebindForm.old_plate) return;
+  try {
+    rebindCheckResult.value = await api.customer.rebindCheck({
+      old_plate: rebindForm.old_plate,
+      new_plate: rebindForm.new_plate
+    });
+  } catch (e) { /* handled */ }
+}
+
+function closeRebind() {
+  rebindDlg.value = false;
+  rebindCheckResult.value = null;
+  rebindForm.void_old_coupons = false;
+  rebindForm.force_rebind = false;
 }
 
 async function doRelease() {

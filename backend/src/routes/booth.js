@@ -275,6 +275,7 @@ router.post('/offline-sync', (req, res) => {
   const tx = db.transaction(() => {
     let successCount = 0;
     let failed = [];
+    let reconcileResults = [];
 
     records.forEach((rec, idx) => {
       try {
@@ -284,7 +285,7 @@ router.post('/offline-sync', (req, res) => {
         const cleanPlate = rec.plate_no.toUpperCase().replace(/\s/g, '');
         const recordNo = generateNo('OF');
 
-        db.prepare(`
+        const offlineInfo = db.prepare(`
           INSERT INTO offline_records (record_no, plate_no, booth_id, action_type,
             action_time, operator_id, synced, remark)
           VALUES (?, ?, ?, ?, ?, ?, 1, ?)
@@ -292,9 +293,16 @@ router.post('/offline-sync', (req, res) => {
                rec.action_type, rec.action_time, userId,
                rec.remark || `离线记录#${idx + 1}`);
 
+        const offlineRecordId = offlineInfo.lastInsertRowid;
+
         const actionTime = dayjs(rec.action_time).isValid()
           ? rec.action_time
           : dayjs().format('YYYY-MM-DD HH:mm:ss');
+
+        let matchedParkingId = null;
+        let matchedCouponId = null;
+        let matchedOrderId = null;
+        let reconcileStatus = 'pending';
 
         if (rec.action_type === 'in') {
           let plate = db.prepare('SELECT * FROM vehicle_plates WHERE plate_no = ?').get(cleanPlate);
@@ -307,10 +315,13 @@ router.post('/offline-sync', (req, res) => {
             db.prepare(`UPDATE vehicle_plates SET in_park = 1, last_in_time = ? WHERE id = ?`)
               .run(actionTime, plate.id);
           }
-          db.prepare(`
-            INSERT INTO parking_records (plate_no, in_time, in_booth, status)
-            VALUES (?, ?, ?, 'parking')
-          `).run(cleanPlate, actionTime, rec.booth_id || booth_id || 'BOOTH');
+          const prInfo = db.prepare(`
+            INSERT INTO parking_records (plate_no, in_time, in_booth, status, exit_type, offline_record_id)
+            VALUES (?, ?, ?, 'parking', 'normal', ?)
+          `).run(cleanPlate, actionTime, rec.booth_id || booth_id || 'BOOTH', offlineRecordId);
+          matchedParkingId = prInfo.lastInsertRowid;
+          reconcileStatus = 'matched';
+
         } else if (rec.action_type === 'out') {
           const parking = db.prepare(`
             SELECT * FROM parking_records
@@ -319,18 +330,112 @@ router.post('/offline-sync', (req, res) => {
           `).get(cleanPlate);
 
           if (parking) {
+            matchedParkingId = parking.id;
             const duration = dayjs(actionTime).diff(dayjs(parking.in_time), 'minute');
             const { fee } = calculateParkingFee(parking.in_time);
+
+            const boundCoupon = db.prepare(`
+              SELECT * FROM coupons
+              WHERE plate_no = ? AND status = 'bound'
+                AND datetime(expire_at) >= datetime(?)
+              ORDER BY bound_at DESC LIMIT 1
+            `).get(cleanPlate, actionTime);
+
+            let discountHours = 0;
+            let discountFee = 0;
+            let actualFee = fee;
+
+            if (boundCoupon) {
+              matchedCouponId = boundCoupon.id;
+              matchedOrderId = boundCoupon.order_id;
+              discountHours = boundCoupon.discount_hours;
+              discountFee = Math.min(fee, discountHours * 10);
+              actualFee = Number((fee - discountFee).toFixed(2));
+
+              db.prepare(`
+                UPDATE coupons SET status = 'verified', verified_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+              `).run(actionTime, boundCoupon.id);
+
+              reconcileStatus = 'matched';
+            } else {
+              reconcileStatus = 'unmatched';
+
+              const relatedOrder = db.prepare(`
+                SELECT o.* FROM orders o
+                LEFT JOIN coupons c ON c.order_id = o.id
+                WHERE c.plate_no = ? AND c.status IN ('issued','bound') AND c.id IS NOT NULL
+                ORDER BY o.pay_time DESC LIMIT 1
+              `).get(cleanPlate);
+              if (relatedOrder) {
+                matchedOrderId = relatedOrder.id;
+              }
+            }
+
             db.prepare(`
               UPDATE parking_records
               SET out_time = ?, out_booth = ?, duration = ?, total_fee = ?,
-                  discount_fee = 0, paid_fee = ?, status = 'exited', updated_at = CURRENT_TIMESTAMP
+                  discount_fee = ?, paid_fee = ?, status = 'exited',
+                  exit_type = 'offline_retro', offline_record_id = ?,
+                  retro_verified = ?, retro_coupon_id = ?,
+                  coupon_id = ?, updated_at = CURRENT_TIMESTAMP
               WHERE id = ?
-            `).run(actionTime, rec.booth_id || booth_id || 'BOOTH', duration, fee, fee, parking.id);
+            `).run(
+              actionTime, rec.booth_id || booth_id || 'BOOTH', duration, fee,
+              discountFee, actualFee, offlineRecordId,
+              boundCoupon ? 1 : 0, boundCoupon ? boundCoupon.id : null,
+              matchedCouponId, parking.id
+            );
+
             db.prepare(`UPDATE vehicle_plates SET in_park = 0, last_out_time = ? WHERE plate_no = ?`)
               .run(actionTime, cleanPlate);
+
+            if (boundCoupon) {
+              db.prepare(`
+                INSERT INTO booth_verifications (plate_no, booth_id, verify_time, coupon_id, coupon_no,
+                  verify_type, discount_hours, parking_duration, parking_fee, actual_fee, status, operator_id, remark)
+                VALUES (?, ?, ?, ?, ?, 'offline', ?, ?, ?, ?, 'success', ?, ?)
+              `).run(
+                cleanPlate, rec.booth_id || booth_id || 'BOOTH', actionTime,
+                boundCoupon.id, boundCoupon.coupon_no,
+                discountHours, duration, fee, actualFee, userId,
+                `离线补录后补核销优惠券${boundCoupon.coupon_no}`
+              );
+            } else {
+              db.prepare(`
+                INSERT INTO booth_verifications (plate_no, booth_id, verify_time, verify_type,
+                  discount_hours, parking_duration, parking_fee, actual_fee, status, operator_id, remark)
+                VALUES (?, ?, ?, 'offline', 0, ?, ?, ?, 'success', ?, ?)
+              `).run(
+                cleanPlate, rec.booth_id || booth_id || 'BOOTH', actionTime,
+                duration, fee, actualFee, userId,
+                `离线补录出场(无券抵扣，需缴费${actualFee}元)`
+              );
+            }
+          } else {
+            reconcileStatus = 'unmatched';
           }
         }
+
+        const now = dayjs().format('YYYY-MM-DD HH:mm:ss');
+        db.prepare(`
+          UPDATE offline_records
+          SET reconcile_status = ?, matched_parking_id = ?, matched_coupon_id = ?,
+              matched_order_id = ?, reconcile_remark = ?, reconcile_at = ?
+          WHERE id = ?
+        `).run(reconcileStatus, matchedParkingId, matchedCouponId, matchedOrderId,
+               reconcileStatus === 'matched' ? '自动补对成功' : (reconcileStatus === 'unmatched' ? '未找到匹配记录' : ''),
+               now, offlineRecordId);
+
+        reconcileResults.push({
+          record_no: recordNo,
+          plate_no: cleanPlate,
+          action_type: rec.action_type,
+          reconcile_status: reconcileStatus,
+          matched_parking_id: matchedParkingId,
+          matched_coupon_id: matchedCouponId,
+          matched_order_id: matchedOrderId
+        });
 
         successCount++;
       } catch (e) {
@@ -343,7 +448,7 @@ router.post('/offline-sync', (req, res) => {
       VALUES (?, ?, 'offline_sync', 'booth', 'offline')
     `).run(userId, role);
 
-    return { success: successCount, total: records.length, failed };
+    return { success: successCount, total: records.length, failed, reconcile_results: reconcileResults };
   });
 
   try {

@@ -57,6 +57,21 @@ function initTables() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS monthly_quotas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_id INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      quota_amount REAL NOT NULL DEFAULT 0,
+      used_amount REAL NOT NULL DEFAULT 0,
+      full_coupon_used REAL NOT NULL DEFAULT 0,
+      discount_coupon_used REAL NOT NULL DEFAULT 0,
+      status TEXT DEFAULT 'active' CHECK(status IN ('active','frozen','closed')),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (shop_id) REFERENCES shops(id),
+      UNIQUE(shop_id, month)
+    );
+
     CREATE TABLE IF NOT EXISTS coupons (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       coupon_no TEXT UNIQUE NOT NULL,
@@ -65,6 +80,7 @@ function initTables() {
       order_amount REAL NOT NULL,
       discount_hours INTEGER NOT NULL,
       discount_value REAL DEFAULT 0,
+      coupon_type TEXT DEFAULT 'full' CHECK(coupon_type IN ('full','discount')),
       plate_id INTEGER,
       plate_no TEXT,
       issued_by INTEGER NOT NULL,
@@ -150,6 +166,12 @@ function initTables() {
       upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
       operator_id INTEGER,
       synced INTEGER DEFAULT 0,
+      reconcile_status TEXT DEFAULT 'pending' CHECK(reconcile_status IN ('pending','matched','unmatched','skipped')),
+      matched_parking_id INTEGER,
+      matched_coupon_id INTEGER,
+      matched_order_id INTEGER,
+      reconcile_remark TEXT,
+      reconcile_at DATETIME,
       remark TEXT
     );
 
@@ -184,6 +206,10 @@ function initTables() {
       status TEXT DEFAULT 'parking' CHECK(status IN ('parking','exited','exception')),
       coupon_id INTEGER,
       release_id INTEGER,
+      exit_type TEXT CHECK(exit_type IN ('normal','offline_retro','manual_release','exception')),
+      offline_record_id INTEGER,
+      retro_verified INTEGER DEFAULT 0,
+      retro_coupon_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -206,10 +232,15 @@ function initTables() {
     CREATE INDEX IF NOT EXISTS idx_coupons_plate ON coupons(plate_no);
     CREATE INDEX IF NOT EXISTS idx_coupons_status ON coupons(status);
     CREATE INDEX IF NOT EXISTS idx_coupons_expire ON coupons(expire_at);
+    CREATE INDEX IF NOT EXISTS idx_coupons_type ON coupons(coupon_type);
     CREATE INDEX IF NOT EXISTS idx_orders_shop ON orders(shop_id);
     CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(customer_phone);
     CREATE INDEX IF NOT EXISTS idx_parking_plate ON parking_records(plate_no, status);
+    CREATE INDEX IF NOT EXISTS idx_parking_exit_type ON parking_records(exit_type);
     CREATE INDEX IF NOT EXISTS idx_release_status ON manual_releases(approve_status);
+    CREATE INDEX IF NOT EXISTS idx_monthly_quotas_shop_month ON monthly_quotas(shop_id, month);
+    CREATE INDEX IF NOT EXISTS idx_offline_reconcile ON offline_records(reconcile_status);
+    CREATE INDEX IF NOT EXISTS idx_offline_plate_time ON offline_records(plate_no, action_time);
   `);
 
   return true;
