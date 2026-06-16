@@ -72,7 +72,7 @@
       </el-button>
     </div>
 
-    <div v-if="syncResult" style="margin-top:20px;" class="card-shadow" :class="syncResult.success === syncResult.total ? 'all-ok' : 'has-fail'" style="padding:20px;">
+    <div v-if="syncResult" class="card-shadow" :class="syncResult.success === syncResult.total ? 'all-ok' : 'has-fail'" style="margin-top:20px;padding:20px;">
       <h3 style="margin:0 0 12px;">
         {{ syncResult.success === syncResult.total ? '✅ 全部同步成功' : '⚠️ 同步结果' }}
       </h3>

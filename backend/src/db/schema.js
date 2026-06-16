@@ -2,6 +2,24 @@ const db = require('./index');
 
 function initTables() {
   db.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE IF EXISTS audit_logs;
+    DROP TABLE IF EXISTS parking_records;
+    DROP TABLE IF EXISTS exception_approvals;
+    DROP TABLE IF EXISTS offline_records;
+    DROP TABLE IF EXISTS manual_releases;
+    DROP TABLE IF EXISTS booth_verifications;
+    DROP TABLE IF EXISTS plate_rebinds;
+    DROP TABLE IF EXISTS coupon_revocations;
+    DROP TABLE IF EXISTS coupons;
+    DROP TABLE IF EXISTS monthly_quotas;
+    DROP TABLE IF EXISTS vehicle_plates;
+    DROP TABLE IF EXISTS orders;
+    DROP TABLE IF EXISTS shops;
+    DROP TABLE IF EXISTS users;
+    PRAGMA foreign_keys = ON;
+  `);
+  db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
