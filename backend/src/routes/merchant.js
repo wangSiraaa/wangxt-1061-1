@@ -42,8 +42,12 @@ router.get('/shop/quota', (req, res) => {
   const monthlyQuota = getOrCreateMonthlyQuota(shopId, currentMonth);
   const remain = Number(monthlyQuota.quota_amount) - Number(monthlyQuota.used_amount);
 
-  shop.monthly_quota = monthlyQuota;
-  shop.monthly_remain = remain;
+  shop.monthly_quota = Number(monthlyQuota.quota_amount);
+  shop.monthly_used = Number(monthlyQuota.used_amount);
+  shop.monthly_remain = Number(remain.toFixed(2));
+  shop.full_coupon_used = Number(monthlyQuota.full_coupon_used);
+  shop.discount_coupon_used = Number(monthlyQuota.discount_coupon_used);
+  shop.monthly_status = monthlyQuota.status;
   shop.current_month = currentMonth;
 
   res.json(success(shop));
